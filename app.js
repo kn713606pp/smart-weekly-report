@@ -49,7 +49,8 @@ let auth, db, googleProvider;
 let currentUser = null, allUsers = [], allTasks = [];
 let currentView = 'assigned', currentFilter = 'all';
 let unsubscribeTasks = null, unsubscribeComments = null;
-let isAuthReady = false; // 新增：追蹤初次驗證是否完成
+let isAuthReady = false; // 追蹤初次驗證是否完成
+let authTimeout; // **新增：驗證逾時的計時器**
 
 // DOM 元素... (維持不變)
 const globalLoader = document.getElementById('global-loader');
@@ -101,10 +102,22 @@ function showGlobalLoader(text = '處理中...') { /* ... (維持不變) ... */ 
 function hideGlobalLoader() { /* ... (維持不變) ... */ }
 
 // ----------------------------------------------------------------
-// 主要初始化函式
+// 主要初始化函式 (核心修改)
 // ----------------------------------------------------------------
 function main() {
-    showGlobalLoader("正在驗證您的身份..."); // **修改點：一開始就顯示驗證中**
+    showGlobalLoader("正在驗證您的身份...");
+
+    // **新增：啟動 5 秒的驗證逾時偵測**
+    authTimeout = setTimeout(() => {
+        if (!isAuthReady) {
+            console.warn("Firebase 驗證逾時！可能是瀏覽器限制或網路問題。");
+            hideGlobalLoader();
+            authContainer.classList.remove('hidden');
+            updateStatus("自動登入逾時，請手動登入。", true);
+            authButtons.forEach(btn => btn.disabled = false);
+        }
+    }, 5000); // 5 秒
+
     try {
         const app = initializeApp(firebaseConfig);
         auth = getAuth(app);
@@ -112,16 +125,15 @@ function main() {
         googleProvider = new GoogleAuthProvider();
         
         setupEventListeners();
-        handleRedirectResult(); // 必須在 onAuthStateChanged 之前處理
-        
-        // **修改點：這是唯一決定顯示哪個畫面的地方**
+        handleRedirectResult();
         onAuthStateChanged(auth, handleAuthStateChange);
 
     } catch (error) {
         console.error("Firebase 初始化失敗:", error);
+        clearTimeout(authTimeout); // 初始化失敗也要清除計時器
         updateStatus("錯誤：無法連接至後端服務。", true);
         hideGlobalLoader();
-        authContainer.classList.remove('hidden'); // 初始化失敗，顯示登入頁
+        authContainer.classList.remove('hidden');
     }
 }
 
@@ -129,33 +141,30 @@ function main() {
 // 驗證處理函式 (核心修改)
 // ----------------------------------------------------------------
 async function handleAuthStateChange(user) {
-    // 只有在第一次 onAuthStateChanged 觸發後，才認為驗證流程已完成
+    // **修改點：只要此函式被觸發，就代表驗證成功，立刻清除逾時**
+    clearTimeout(authTimeout);
+
     if (!isAuthReady) {
         isAuthReady = true;
     }
 
     if (user) {
-        // 使用者已登入
         currentUser = user;
         const userRef = doc(db, "users", user.uid);
         await setDoc(userRef, { displayName: user.displayName, email: user.email }, { merge: true });
 
-        // 畫面切換
         appContainer.classList.remove('hidden');
         authContainer.classList.add('hidden');
         
         userDisplayName.textContent = currentUser.displayName || currentUser.email;
         
-        // 獲取應用程式資料
         await fetchUsers();
         fetchTasks();
     } else {
-        // 使用者未登入
         currentUser = null;
         appContainer.classList.add('hidden');
         authContainer.classList.remove('hidden');
 
-        // 啟用登入/註冊按鈕
         authButtons.forEach(btn => btn.disabled = false);
         updateStatus("請登入或註冊以繼續。", false);
         
@@ -163,79 +172,22 @@ async function handleAuthStateChange(user) {
         if (unsubscribeComments) unsubscribeComments();
     }
 
-    // 無論登入與否，初次驗證完成後就隱藏全域載入畫面
     hideGlobalLoader();
 }
 
-
-async function handleRedirectResult() {
-    // 只有在初次驗證未完成時才檢查，避免重複觸發
-    if (!isAuthReady) {
-        try {
-            const result = await getRedirectResult(auth);
-            if (result) {
-                // 如果有結果，onAuthStateChanged 會自動處理後續
-                // 這裡可以短暫顯示歡迎訊息
-                showGlobalLoader(`歡迎 ${result.user.displayName}！正在載入資料...`);
-            }
-        } catch (error) {
-            console.error("Google 登入錯誤:", error);
-            updateStatus(`Google 登入失敗: ${error.code}`, true);
-        }
-    }
-}
-
-async function handleEmailRegister(e) {
-    e.preventDefault();
-    setButtonLoading(registerSubmitBtn, true);
-    
-    const displayName = document.getElementById('register-name').value;
-    const email = document.getElementById('register-email').value;
-    const password = document.getElementById('register-password').value;
-    
-    try {
-        await createUserWithEmailAndPassword(auth, email, password);
-        // **修改點：不需要手動更新畫面，onAuthStateChanged 會自動處理**
-        updateStatus("註冊成功！將自動登入。", false);
-    } catch (error) {
-        updateStatus(`註冊失敗：${error.code}`, true);
-    } finally {
-        setButtonLoading(registerSubmitBtn, false);
-    }
-}
-
-async function handleEmailLogin(e) {
-    e.preventDefault();
-    setButtonLoading(loginSubmitBtn, true);
-
-    const email = document.getElementById('login-email').value;
-    const password = document.getElementById('login-password').value;
-    try {
-        await signInWithEmailAndPassword(auth, email, password);
-        // **修改點：不需要手動更新畫面，onAuthStateChanged 會自動處理**
-        updateStatus("登入中...", false);
-    } catch (error) {
-        updateStatus(`登入失敗：${error.code}`, true);
-    } finally {
-        setButtonLoading(loginSubmitBtn, false);
-    }
-}
-
-async function handleGoogleLogin() {
-    updateStatus("正在重新導向至 Google...", false);
-    await signInWithRedirect(auth, googleProvider).catch(error => {
-        updateStatus("無法啟動 Google 登入流程。", true);
-    });
-}
+// 其餘驗證函式維持不變...
+async function handleRedirectResult() { if (!isAuthReady) { try { const result = await getRedirectResult(auth); if (result) { showGlobalLoader(`歡迎 ${result.user.displayName}！正在載入資料...`); } } catch (error) { console.error("Google 登入錯誤:", error); updateStatus(`Google 登入失敗: ${error.code}`, true); } } }
+async function handleEmailRegister(e) { e.preventDefault(); setButtonLoading(registerSubmitBtn, true); const displayName = document.getElementById('register-name').value; const email = document.getElementById('register-email').value; const password = document.getElementById('register-password').value; try { await createUserWithEmailAndPassword(auth, email, password); updateStatus("註冊成功！將自動登入。", false); } catch (error) { updateStatus(`註冊失敗：${error.code}`, true); } finally { setButtonLoading(registerSubmitBtn, false); } }
+async function handleEmailLogin(e) { e.preventDefault(); setButtonLoading(loginSubmitBtn, true); const email = document.getElementById('login-email').value; const password = document.getElementById('login-password').value; try { await signInWithEmailAndPassword(auth, email, password); updateStatus("登入中...", false); } catch (error) { updateStatus(`登入失敗：${error.code}`, true); } finally { setButtonLoading(loginSubmitBtn, false); } }
+async function handleGoogleLogin() { updateStatus("正在重新導向至 Google...", false); await signInWithRedirect(auth, googleProvider).catch(error => { updateStatus("無法啟動 Google 登入流程。", true); }); }
 
 
 // --- 以下所有函式維持不變 ---
-// --- 為了簡潔，此處省略，但請確保您的檔案中包含所有功能 ---
 updateStatus=function(t,s=!1){console.log(`[STATUS] ${s?"ERROR: ":""}${t}`),authError.textContent=t,statusPanel.className=`mb-4 p-3 rounded-lg text-center text-sm ${s?"bg-red-100 text-red-700":"bg-green-100 text-green-700"}`};setButtonLoading=function(t,s){const e=t.querySelector(".btn-text"),o=t.querySelector(".spinner");s?(t.disabled=!0,e&&o&&(e.style.visibility="hidden",o.style.display="inline-block")):(t.disabled=!1,e&&o&&(e.style.visibility="visible",o.style.display="none"))};showGlobalLoader=function(t="處理中..."){loaderText.textContent=t,globalLoader.classList.remove("hidden")};hideGlobalLoader=function(){globalLoader.classList.add("hidden")};
 function setupEventListeners(){loginForm.addEventListener("submit",handleEmailLogin),registerForm.addEventListener("submit",handleEmailRegister),googleSigninBtn.addEventListener("click",handleGoogleLogin),logoutBtn.addEventListener("click",()=>signOut(auth)),showLoginBtn.addEventListener("click",toggleAuthForm),showRegisterBtn.addEventListener("click",toggleAuthForm),addNewTaskBtn.addEventListener("click",openNewTaskModal),modalTaskForm.addEventListener("submit",handleTaskFormSubmit),taskList.addEventListener("click",handleTaskListClick),taskList.addEventListener("change",handleTaskStatusChange),viewToggleContainer.addEventListener("click",handleViewToggle),filterContainer.addEventListener("click",handleFilterToggle),deleteConfirmBtn.addEventListener("click",handleDeleteTask),addCommentForm.addEventListener("submit",handleAddComment),modalCancelBtn.addEventListener("click",()=>closeModal(taskModal)),detailModalCloseBtn.addEventListener("click",()=>{closeModal(taskDetailModal),unsubscribeComments&&unsubscribeComments()}),deleteCancelBtn.addEventListener("click",()=>closeModal(deleteConfirmModal)),document.getElementById("generate-report-btn").addEventListener("click",generateReport),document.getElementById("copy-report-btn").addEventListener("click",copyReport)}
 function toggleAuthForm(e){const t=e.target.id==="show-login-btn";loginForm.classList.toggle("hidden",!t),registerForm.classList.toggle("hidden",t),showLoginBtn.classList.toggle("text-indigo-600",t),showLoginBtn.classList.toggle("border-indigo-600",t),showLoginBtn.classList.toggle("text-gray-500",!t),showRegisterBtn.classList.toggle("text-indigo-600",!t),showRegisterBtn.classList.toggle("border-indigo-600",!t),showRegisterBtn.classList.toggle("text-gray-500",t),updateStatus("請登入或註冊",!1)}
 function openModal(e){e.classList.remove("hidden")}function closeModal(e){e.classList.add("hidden")}function openNewTaskModal(){modalTaskForm.reset(),modalTaskId.value="",modalTitle.textContent="新增任務",populateAssigneeDropdown(),openModal(taskModal)}async function handleTaskFormSubmit(e){e.preventDefault();if(!currentUser)return;const t=allUsers.find(e=>e.id===modalTaskAssignee.value);if(!t)return void alert("請選擇指派對象");const o=modalTaskId.value,n={title:modalTaskTitle.value.trim(),description:modalTaskDesc.value.trim(),assigneeId:t.id,assigneeName:t.displayName,dueDate:modalTaskDueDate.value?Timestamp.fromDate(new Date(modalTaskDueDate.value)):null,updatedAt:serverTimestamp()};try{o?await updateDoc(doc(db,"tasks",o),n):await addDoc(collection(db,"tasks"),{...n,status:"todo",creatorId:currentUser.uid,creatorName:currentUser.displayName,createdAt:serverTimestamp()}),closeModal(taskModal)}catch(e){console.error("儲存任務失敗:",e)}}
-function handleTaskListClick(e){const t=e.target,o=t.closest("[data-task-id]");if(t.closest(".edit-task-btn")){const o=t.closest(".edit-task-btn").dataset.id,n=allTasks.find(e=>e.id===o);n&&openEditModal(n)}else if(t.closest(".delete-task-btn")){const o=t.closest(".delete-task-btn").dataset.id;deleteConfirmBtn.dataset.id=o,openModal(deleteConfirmModal)}else if(o){const e=o.dataset.taskId,t=allTasks.find(t=>t.id===e);t&&openDetailModal(t)}}async function handleTaskStatusChange(e){if(e.target.classList.contains("task-status-select")){const t=e.target.dataset.id,o=e.target.value,n={status:o};"done"===o?n.completedAt=serverTimestamp():n.completedAt=null;try{await updateDoc(doc(db,"tasks",t),n)}catch(e){console.error("更新狀態失敗:",e)}}}
+function handleTaskListClick(e){const t=e.target,o=t.closest("[data-task-id]");if(t.closest(".edit-task-btn")){const o=t.closest(".edit-task-btn").dataset.id,n=allUsers.find(e=>e.id===o);n&&openEditModal(n)}else if(t.closest(".delete-task-btn")){const o=t.closest(".delete-task-btn").dataset.id;deleteConfirmBtn.dataset.id=o,openModal(deleteConfirmModal)}else if(o){const e=o.dataset.taskId,t=allTasks.find(t=>t.id===e);t&&openDetailModal(t)}}async function handleTaskStatusChange(e){if(e.target.classList.contains("task-status-select")){const t=e.target.dataset.id,o=e.target.value,n={status:o};"done"===o?n.completedAt=serverTimestamp():n.completedAt=null;try{await updateDoc(doc(db,"tasks",t),n)}catch(e){console.error("更新狀態失敗:",e)}}}
 function handleViewToggle(e){if("BUTTON"===e.target.tagName){currentView=e.target.dataset.view;document.querySelectorAll(".view-toggle-btn").forEach(e=>{e.classList.remove("bg-indigo-600","text-white"),e.classList.add("bg-gray-200","text-gray-700")});e.target.classList.add("bg-indigo-600","text-white");fetchTasks()}}function handleFilterToggle(e){if("BUTTON"===e.target.tagName){currentFilter=e.target.dataset.filter;document.querySelectorAll(".filter-btn").forEach(e=>{e.classList.remove("bg-indigo-500","text-white"),e.classList.add("bg-gray-200","text-gray-700")});e.target.classList.add("bg-indigo-500","text-white");renderTasks()}}async function handleDeleteTask(e){const t=e.target.closest("#delete-confirm-modal").querySelector("#delete-confirm-btn").dataset.id;t&&deleteDoc(doc(db,"tasks",t)).then(()=>closeModal(deleteConfirmModal)).catch(e=>console.error("刪除任務失敗:",e))}
 async function handleAddComment(e){e.preventDefault();const t=addCommentForm.dataset.taskId,o=commentInput.value.trim();if(!o||!t)return;try{const e=collection(db,`tasks/${t}/comments`);await addDoc(e,{text:o,authorId:currentUser.uid,authorName:currentUser.displayName,createdAt:serverTimestamp()});commentInput.value=""}catch(e){console.error("新增評論失敗:",e)}}async function fetchUsers(){const e=collection(db,"users"),t=query(e,orderBy("displayName"));onSnapshot(t,e=>{allUsers=e.docs.map(e=>({id:e.id,...e.data()}));populateAssigneeDropdown()})}
 function fetchTasks(){if(!currentUser)return;unsubscribeTasks&&unsubscribeTasks();taskLoader.classList.remove("hidden");taskList.innerHTML="";const e=collection(db,"tasks"),t="assigned"===currentView?"assigneeId":"creatorId",o=query(e,where(t,"==",currentUser.uid),orderBy("createdAt","desc"));unsubscribeTasks=onSnapshot(o,e=>{allTasks=e.docs.map(e=>({id:e.id,...e.data()}));taskLoader.classList.add("hidden");renderTasks()})}
